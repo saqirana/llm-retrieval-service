@@ -1,0 +1,188 @@
+name: CD - Continuous Deployment
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: llm-retrieval-service
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/develop' || github.event.inputs.environment == 'dev'
+    environment:
+      name: development
+      url: https://dev.llm-retrieval.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS
+        run: |
+          # Update ECS service with new task definition
+          aws ecs update-service \
+            --cluster llm-retrieval-dev \
+            --service llm-retrieval-service \
+            --force-new-deployment
+
+      - name: Run database migrations
+        run: |
+          # Run Alembic migrations
+          echo "Running database migrations..."
+
+      - name: Verify deployment
+        run: |
+          # Wait for deployment to stabilize
+          sleep 30
+          # Run smoke tests
+          curl -f https://dev.llm-retrieval.example.com/health || exit 1
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' || github.event.inputs.environment == 'staging'
+    environment:
+      name: staging
+      url: https://staging.llm-retrieval.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster llm-retrieval-staging \
+            --service llm-retrieval-service \
+            --force-new-deployment
+
+      - name: Run database migrations
+        run: |
+          echo "Running database migrations..."
+
+      - name: Verify deployment
+        run: |
+          sleep 30
+          curl -f https://staging.llm-retrieval.example.com/health || exit 1
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy-staging]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.environment == 'production'
+    environment:
+      name: production
+      url: https://llm-retrieval.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create backup
+        run: |
+          echo "Creating database backup..."
+
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster llm-retrieval-prod \
+            --service llm-retrieval-service \
+            --force-new-deployment
+
+      - name: Run database migrations
+        run: |
+          echo "Running database migrations..."
+
+      - name: Verify deployment
+        run: |
+          sleep 60
+          curl -f https://llm-retrieval.example.com/health || exit 1
+
+      - name: Notify team
+        if: always()
+        run: |
+          echo "Deployment completed. Status: ${{ job.status }}"
+

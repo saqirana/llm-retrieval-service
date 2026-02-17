@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+  # FastAPI Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llm-retrieval-app
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=llm_user
+      - POSTGRES_PASSWORD=changeme
+      - POSTGRES_DB=llm_retrieval
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+      - ./main.py:/app/main.py
+    networks:
+      - llm-network
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: llm-retrieval-postgres
+    environment:
+      - POSTGRES_USER=llm_user
+      - POSTGRES_PASSWORD=changeme
+      - POSTGRES_DB=llm_retrieval
+      - POSTGRES_INITDB_ARGS=-E UTF8
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llm_user -d llm_retrieval"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - llm-network
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: llm-retrieval-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - llm-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  # PgAdmin (Database Management)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: llm-retrieval-pgadmin
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@example.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - llm-network
+    restart: unless-stopped
+
+  # Nginx (Optional - for production)
+  nginx:
+    image: nginx:alpine
+    container_name: llm-retrieval-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - app
+    networks:
+      - llm-network
+    restart: unless-stopped
+    profiles:
+      - production
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  llm-network:
+    driver: bridge
+
